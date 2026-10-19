@@ -1,0 +1,33 @@
+[project]
+name = "multimodal-rag-backend"
+version = "0.1.0"
+description = "FastAPI backend for a multimodal RAG application"
+requires-python = ">=3.12"
+dependencies = [
+    "alembic",
+    "celery[redis]",
+    "fastapi",
+    "imagekitio",
+    "langchain",
+    "langchain-core",
+    "langchain-huggingface",
+    "langchain-openrouter",
+    "langgraph",
+    "langgraph-checkpoint-postgres",
+    "numpy",
+    "pandas>=3.0.6",
+    "pgvector",
+    "psycopg[binary]",
+    "pwdlib[argon2]>=0.3.1",
+    "pydantic-settings",
+    "pydantic[email]>=2.12.5",
+    "pymupdf",
+    "python-jose>=3.5.0",
+    "python-multipart",
+    "sentence-transformers",
+    "sqlalchemy",
+    "uvicorn[standard]",
+]
+
+[tool.uv]
+package = false
