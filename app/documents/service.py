@@ -4,6 +4,8 @@
 # Source timestamp: 2026-10-19 17:11:51 UTC (1792429911)
 
 from imagekitio import ImageKit
+import re
+from app.workflow.prompts.rag import RAG_PROMPT
 from fastapi import UploadFile, HTTPException
 from sqlalchemy.orm import Session
 from app.shared.config import settings
@@ -42,7 +44,9 @@ class DocumentService:
     def __init__(self, db: Session):
         self.db = db
         self.vision_model = ChatOpenRouter(model="qwen/qwen3.8-27b")
-        self.text_model = ChatOpenRouter(model="anthropic/claude-haiku-5.5")
+        self.text_model = ChatOpenRouter(
+            model="anthropic/claude-haiku-5.5", stream_usage=True
+        )
         self.embedding_model = HuggingFaceEmbeddings(
             model_name="sentence-transformers/all-MiniLM-L6-v2",
             model_kwargs={"device": "cpu"},
@@ -371,42 +375,64 @@ class DocumentService:
         ]
 
     def build_citations(
-        self, segment_ids: list, retrieved_segments: list[dict]
+        self,
+        segment_ids: list,
+        retrieved_segments: list[dict],
     ) -> list[dict]:
         if not segment_ids or not retrieved_segments:
             return []
-        else:
-            segments_map = {
-                segment["segment_id"]: segment for segment in retrieved_segments
+
+        # Map each retrieved segment by its ID.
+        segments_map = {
+            str(segment["segment_id"]): segment
+            for segment in retrieved_segments
+            if segment.get("segment_id") is not None
+        }
+
+        citations = []
+        seen_ids = set()
+
+        for item in segment_ids:
+            # Support string IDs, dictionaries, and objects.
+            if isinstance(item, str):
+                segment_id = item
+
+            elif isinstance(item, dict):
+                segment_id = item.get("segment_id")
+
+            else:
+                segment_id = getattr(item, "segment_id", None)
+
+            if segment_id is None:
+                continue
+
+            # Normalize UUIDs and other ID types to strings.
+            segment_id = str(segment_id)
+
+            if segment_id in seen_ids:
+                continue
+
+            segment = segments_map.get(segment_id)
+
+            if segment is None:
+                continue
+
+            metadata = segment.get("metadata") or {}
+
+            citation = {
+                "segment_id": segment_id,
+                "filename": segment.get("filename"),
+                "page": segment.get("page"),
+                "modality": segment.get("modality"),
+                "content": segment.get("content"),
+                "image_url": metadata.get("image_url"),
+                "file_url": metadata.get("file_url"),
             }
-            citations = []
-            seen_ids = set()
-            for item in segment_ids:
-                if isinstance(item, dict):
-                    segment_id = item.get("segment_id")
-                else:
-                    segment_id = getattr(item, "segment_id", None)
-                if not segment_id or segment_id in seen_ids:
-                    continue
-                else:
-                    segment = segments_map.get(segment_id)
-                    if segment is None:
-                        continue
-                    else:
-                        metadata = segment.get("metadata") or {}
-                        citations.append(
-                            {
-                                "segment_id": segment_id,
-                                "filename": segment.get("filename"),
-                                "page": segment.get("page"),
-                                "modality": segment.get("modality"),
-                                "content": segment.get("content"),
-                                "image_url": metadata.get("image_url"),
-                                "file_url": metadata.get("file_url"),
-                            }
-                        )
-                        seen_ids.add(segment_id)
-            return citations
+
+            citations.append(citation)
+            seen_ids.add(segment_id)
+
+        return citations
 
     def generate_answer(self, query: str, retrieved_segments: list[dict]):
         context = "\n\n".join(
@@ -435,3 +461,87 @@ class DocumentService:
         )
         response = {"answer": result.answer, "citations": citations}
         return response
+
+    def generate_answer_stream(
+        self,
+        query: str,
+        retrieved_segments: list[dict],
+    ) -> dict:
+        if not retrieved_segments:
+            return {
+                "answer": (
+                    "I couldn't find enough information in your "
+                    "uploaded documents to answer this question."
+                ),
+                "citations": [],
+            }
+
+        numbered_segments = {
+            str(index): segment["segment_id"]
+            for index, segment in enumerate(retrieved_segments, start=1)
+        }
+
+        context_parts = []
+
+        for index, item in enumerate(retrieved_segments, start=1):
+            context_parts.append(f"""
+    [Source {index}]
+    Source ID: {item["segment_id"]}
+    Filename: {item["filename"]}
+    Page: {item["page"]}
+    Modality: {item["modality"]}
+    Content:
+    {item["content"]}
+    """)
+
+        context = "\n\n".join(context_parts)
+
+        chain = RAG_PROMPT | self.text_model
+
+        answer_parts = []
+        full_message = None
+
+        for chunk in chain.stream(
+            {
+                "question": query,
+                "context": context,
+            }
+        ):
+            full_message = chunk if full_message is None else full_message + chunk
+            content = chunk.content
+
+            if isinstance(content, str) and content:
+                answer_parts.append(content)
+
+        answer = "".join(answer_parts).strip()
+        usage_metadata = getattr(full_message, "usage_metadata", None) or {}
+        usage = {
+            "input_tokens": usage_metadata.get("input_tokens", 0),
+            "output_tokens": usage_metadata.get("output_tokens", 0),
+            "total_tokens": usage_metadata.get("total_tokens", 0),
+            "input_token_details": usage_metadata.get("input_token_details", {}),
+            "output_token_details": usage_metadata.get("output_token_details", {}),
+        }
+
+        # Convert inline references such as [1], [2] to real segment IDs.
+        referenced_numbers = re.findall(
+            r"\[(\d+)\]",
+            answer,
+        )
+
+        segment_ids = []
+        seen = set()
+
+        for number in referenced_numbers:
+            segment_id = numbered_segments.get(number)
+
+            if segment_id and segment_id not in seen:
+                segment_ids.append(segment_id)
+                seen.add(segment_id)
+
+        citations = self.build_citations(
+            segment_ids=segment_ids,
+            retrieved_segments=retrieved_segments,
+        )
+
+        return {"answer": answer, "citations": citations, "usage": usage}
