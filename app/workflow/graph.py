@@ -6,7 +6,7 @@ from app.workflow.nodes import retrieve_node, generate_node
 
 
 def build_workflow(
-    checkpointer: BaseCheckpointSaver,
+    checkpointer: BaseCheckpointSaver = None,
 ):
     builder = StateGraph(RAGState)
 
@@ -16,5 +16,7 @@ def build_workflow(
     builder.add_edge(START, "retrieve")
     builder.add_edge("retrieve", "generate")
     builder.add_edge("generate", END)
+    if checkpointer is not None:
+        return builder.compile(checkpointer=checkpointer)
 
     return builder.compile(checkpointer=checkpointer)

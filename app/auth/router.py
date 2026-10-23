@@ -13,7 +13,7 @@ from app.auth.schema import (
     LoginResponse,
 )
 from app.auth.service import AuthService
-from fastapi import Response
+from fastapi import Response, Request
 
 auth_router = APIRouter(prefix="/auth", tags=["Authentication"])
 
@@ -49,3 +49,39 @@ def login_user(user: LoginSchema, response: Response, db: Session = Depends(get_
             "success": True,
             "data": data["user_data"],
         }
+
+
+@auth_router.post("/refresh")
+def refresh_token(
+    request: Request,
+    response: Response,
+    db: Session = Depends(get_db),
+):
+    refresh_token = request.cookies.get("refresh_token")
+
+    if not refresh_token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Refresh token missing",
+        )
+
+    service = AuthService(db, response)
+    return service.refresh_access_token(refresh_token)
+
+
+@auth_router.post("/logout")
+def logout(
+    response: Response,
+    db: Session = Depends(get_db),
+):
+    service = AuthService(db, response)
+    return service.logout_user()
+
+
+@auth_router.get("/me")
+def get_me(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    service = AuthService(db, response=None)
+    return service.get_current_user(request)

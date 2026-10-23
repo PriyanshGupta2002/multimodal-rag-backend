@@ -6,7 +6,7 @@
 from imagekitio import ImageKit
 import re
 from app.workflow.prompts.rag import RAG_PROMPT
-from fastapi import UploadFile, HTTPException
+from fastapi import UploadFile, HTTPException, status
 from sqlalchemy.orm import Session
 from app.shared.config import settings
 from app.user.model import User
@@ -545,3 +545,88 @@ class DocumentService:
         )
 
         return {"answer": answer, "citations": citations, "usage": usage}
+
+    def get_document_status(
+        self,
+        user_id: UUID,
+        doc_id: UUID,
+    ) -> Document:
+        print("Requested doc_id:", doc_id, type(doc_id))
+        print("Authenticated user_id:", user_id, type(user_id))
+
+        doc_stmt = select(Document).where(
+            Document.id == doc_id,
+        )
+
+        document = self.db.execute(doc_stmt).scalar_one_or_none()
+
+        print("Document found:", document)
+
+        if document:
+            print("Actual owner_id:", document.user_id)
+            print("Owner matches:", document.user_id == user_id)
+
+        if not document or document.user_id != user_id:
+            raise HTTPException(
+                status_code=404,
+                detail="Document not found",
+            )
+
+        return document
+
+    def get_user_docs(self, user_id: UUID):
+        user_exists_stmt = select(User).where(user_id == User.id)
+        stmt = select(Document).where(user_id == Document.user_id)
+
+        does_user_exist = self.db.execute(user_exists_stmt).scalar_one_or_none()
+        if does_user_exist is None:
+            raise HTTPException(
+                detail="User not found", status_code=status.HTTP_404_NOT_FOUND
+            )
+        documents_list = self.db.execute(stmt).scalars().all()
+        return documents_list
+
+    def delete_document(self, document_id: UUID, user_id: UUID) -> dict:
+        # Find the document and verify ownership.
+        stmt = select(Document).where(
+            Document.id == document_id,
+            Document.user_id == user_id,
+        )
+
+        document = self.db.execute(stmt).scalar_one_or_none()
+
+        if document is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Document not found",
+            )
+
+        try:
+            # Delete the original file from ImageKit.
+            if document.imagekit_file_id:
+                self.image_kit.files.delete(file_id=document.imagekit_file_id)
+
+            # Delete extracted segments/embeddings from the database.
+            self.db.query(DocumentSegment).filter(
+                DocumentSegment.document_id == document.id
+            ).delete(synchronize_session=False)
+
+            # Delete the document record.
+            self.db.delete(document)
+            self.db.commit()
+
+            return {
+                "message": "Document deleted successfully",
+                "document_id": str(document_id),
+            }
+
+        except Exception:
+            self.db.rollback()
+            logger.exception(
+                "Failed to delete document %s",
+                document_id,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to delete document",
+            )

@@ -48,7 +48,7 @@ class ChatService:
         thread_id: UUID,
         user_id: UUID,
         message: str,
-        document_id: UUID,
+        document_id: UUID | None,
     ):
         thread = self._get_owned_thread(thread_id, user_id)
 
@@ -83,7 +83,7 @@ class ChatService:
         inputs = {
             "query": message,
             "user_id": str(user_id),
-            "document_id": str(document_id),
+            "document_id": str(document_id) if document_id is not None else None,
             "messages": [HumanMessage(content=message)],
             "retrieved_segments": [],
             "answer": "",

@@ -6,6 +6,7 @@
 from app.shared.celery_app import celery_app
 from app.shared.db import LocalSession
 from app.documents.service import DocumentService
+from app.shared import model
 
 
 @celery_app.task(name="documents.process_document")

@@ -7,10 +7,16 @@ from sqlalchemy.orm import Session
 from app.auth.schema import RegisterRequestSchema, LoginSchema
 from app.user.model import User
 from sqlalchemy import insert, select
-from fastapi import HTTPException, status, Response
-from app.shared.helpers import get_password_hash, verify_password, create_token
+from fastapi import HTTPException, status, Response, Request
+from app.shared.helpers import (
+    get_password_hash,
+    verify_password,
+    create_token,
+    verify_token,
+)
 from app.shared.config import settings
 from datetime import timedelta
+from uuid import UUID
 
 
 class AuthService:
@@ -94,3 +100,94 @@ class AuthService:
                     "refresh_token": refresh_token,
                     "user_data": existing_user,
                 }
+
+    def refresh_access_token(self, refresh_token: str):
+        # Verify the refresh token using your existing JWT helper.
+
+        payload = verify_token(refresh_token)
+
+        if not payload or payload.get("type") != "refresh":
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid refresh token",
+            )
+
+        user_id = payload.get("sub")
+        if not user_id:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid refresh token payload",
+            )
+
+        access_token = create_token(
+            data={"sub": user_id, "type": "access"},
+            expires_delta=timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES),
+        )
+
+        self.response.set_cookie(
+            key="access_token",
+            value=access_token,
+            httponly=True,
+            secure=True,
+            samesite="lax",
+            max_age=settings.ACCESS_TOKEN_EXPIRE_MINUTES * 60,
+            path="/",
+        )
+
+        return {"message": "Access token refreshed"}
+
+    def logout_user(self):
+        self.response.delete_cookie(
+            key="access_token",
+            path="/",
+            secure=True,
+            httponly=True,
+            samesite="lax",
+        )
+        self.response.delete_cookie(
+            key="refresh_token",
+            path="/",
+            secure=True,
+            httponly=True,
+            samesite="lax",
+        )
+
+        return {"message": "Logged out successfully"}
+
+    def get_current_user(self, request: Request):
+        access_token = request.cookies.get("access_token")
+
+        if not access_token:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Not authenticated",
+            )
+
+        payload = verify_token(
+            access_token,
+            expected_type="access",
+        )
+
+        try:
+            user_id = UUID(payload["sub"])
+        except (ValueError, TypeError, KeyError):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token payload",
+            )
+
+        user = self.db.execute(
+            select(User).where(User.id == user_id)
+        ).scalar_one_or_none()
+
+        if user is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="User not found",
+            )
+
+        return {
+            "id": str(user.id),
+            "name": user.name,
+            "email": user.email,
+        }
